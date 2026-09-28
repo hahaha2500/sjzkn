@@ -37,6 +37,7 @@ import hashlib
 import json
 import re
 import socket
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -64,6 +65,7 @@ SITE = "https://gaze.red"
 # 镜像池：站方公告确认 gaze.run/gaze.host/gazes.site 已 DNS 污染故不放；顺序即尝试顺序
 MIRRORS = ["gaze.red", "gazes.top", "gazes.store", "gaze.show", "gazes.host"]
 _GOOD_HOST = None          # 本进程内最近一次能通的镜像，下次直接从它开始
+_CAP_LOCK = threading.RLock()
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 CHALLENGE_MARK = "<cap-widget data-cap-api-endpoint"
@@ -515,10 +517,17 @@ class Session(object):
         now = time.time()
         if self.has_cap() and now - self._cap_ts < 60:
             return True
+        if not _CAP_LOCK.acquire(timeout=30):     # 等后台预热线程跑完
+            return self.has_cap()
         try:
-            self._send("GET", "/", timeout=15)
-        except Exception:
-            pass
+            if self.has_cap():                    # 合并回来的 cookie 已生效
+                self._cap_ts = time.time()
+                return True
+            return self._cap_bypass_locked()
+        finally:
+            _CAP_LOCK.release()
+
+    def _cap_bypass_locked(self):
         try:
             raw = self._send("POST", "/event/cap/challenge", data=b"",
                              headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
@@ -543,6 +552,34 @@ class Session(object):
         except Exception as e:
             self.last_err = "cap:%s" % repr(e)[:60]
             return False
+
+    def warm_cap_async(self):
+        """后台线程先把验证过了（用户点进分类/详情时就不必现解，省 5~15 秒）"""
+        if self.has_cap() or getattr(self, "_warm_started", False):
+            return
+        self._warm_started = True
+        host = self.host
+
+        def run():
+            try:
+                with _CAP_LOCK:                # 与前台过验证互斥
+                    tmp = Session(host)
+                    if tmp.cap_bypass() and tmp.has_cap():
+                        self._merge_cookies(tmp)
+            except Exception as e:
+                self.last_err = "warm:%s" % repr(e)[:60]
+        threading.Thread(target=run, daemon=True).start()
+
+    def _merge_cookies(self, other):
+        try:
+            if self.rs is not None and other.rs is not None:
+                for c in other.rs.cookies:
+                    self.rs.cookies.set_cookie(c)
+            elif self.cj is not None and other.cj is not None:
+                for c in other.cj:
+                    self.cj.set_cookie(c)
+        except Exception:
+            pass
 
     def home_html(self, cache=300):
         """首页 HTML（gzip 后约 40KB），默认缓存 5 分钟"""
@@ -774,6 +811,10 @@ class Spider(BaseSpider):
     def homeContent(self, filter=False):
         s = self._s()
         try:
+            s.warm_cap_async()
+        except Exception:
+            pass
+        try:
             html = s.home_html()
         except Exception:
             html = ""
@@ -790,6 +831,10 @@ class Spider(BaseSpider):
 
     def homeVideoContent(self):
         s = self._s()
+        try:
+            s.warm_cap_async()
+        except Exception:
+            pass
         try:
             html = s.home_html()
         except Exception:
@@ -923,7 +968,7 @@ class Spider(BaseSpider):
                   "Accept": "text/html,application/xhtml+xml,*/*;q=0.8"}
         if "原站" not in flag:
             try:
-                ck = _cookie_header(s)
+                ck = s.cookie_header()
                 if ck:
                     header["Cookie"] = ck
             except Exception:

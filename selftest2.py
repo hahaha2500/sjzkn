@@ -62,6 +62,7 @@ def fake_send(self, method, path, data=None, headers=None, timeout=20):
 
 def attach(sp):
     sp.sess._send = lambda *a, **k: fake_send(sp.sess, *a, **k)
+    sp.sess.warm_cap_async = lambda: None      # 自测不打真实网络
 
 
 def main():
