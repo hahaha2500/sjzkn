@@ -72,8 +72,11 @@ class Spider(BaseSpider):
         {"type_id": "纪录片", "type_name": "纪录片"},
         {"type_id": "武侠", "type_name": "武侠"},
     ]
-    # 首页「大家在搜」热词（取自站方首页）
-    HOT = ["星际穿越", "漫长的季节", "琅琊榜", "流浪地球"]
+    # 首页聚合词：站方「大家在搜」4热词 + 近期更新聚合词(2026)
+    # ★去重后每词只留1条同名片, 必须词多量大才铺得满首页
+    HOT = ["星际穿越", "漫长的季节", "琅琊榜", "流浪地球",
+           "2026", "凡人修仙传", "吞噬星空", "诡秘之主",
+           "庆余年", "三体", "斗破苍穹", "完美世界"]
     # 上游源 key → 中文名（详情多线路用，未收录的用原 key）
     SRC_NAME = {
         "dyttzy": "电影天堂", "ruyi": "如意", "bfzy": "非凡影视",
@@ -327,26 +330,42 @@ class Spider(BaseSpider):
 
             def grab(i):
                 try:
-                    results[i] = self._search_api(self.HOT[i], 1, 8, cache=300)[0]
+                    results[i] = self._search_api(self.HOT[i], 1, 20, cache=300)[0]
                 except Exception:
                     results[i] = []
 
             try:
                 from concurrent.futures import ThreadPoolExecutor
-                with ThreadPoolExecutor(max_workers=4) as ex:
+                with ThreadPoolExecutor(max_workers=6) as ex:
                     list(ex.map(grab, range(len(self.HOT))))
             except Exception:
                 for i in range(len(self.HOT)):
                     grab(i)
 
-            vods, seen = [], set()
+            # 先按片名+年份去重(根因: 同片10上游源各一条, id不同会全留下)
+            blocks = []
             for block in results:
+                blk = []
                 for it in (block or []):
                     v = self._item_vod(it)
-                    if v and v["vod_id"] not in seen:
-                        seen.add(v["vod_id"])
-                        vods.append(v)
-            vods = vods[:36]
+                    if v:
+                        blk.append(v)
+                blocks.append(self._dedup(blk))
+            # 再交错洗牌: 每个词最多贡献4条, 轮转铺开 → 首页不整屏同词族
+            # ★去重键只用片名(年份字段上游不齐, 同片不同年会漏网 → 凡人修仙传x3)
+            vods, seen_names = [], set()
+            for slot in range(4):
+                for blk in blocks:
+                    if slot < len(blk):
+                        v = blk[slot]
+                        nm = v.get("vod_name") or ""
+                        if nm and nm not in seen_names:
+                            seen_names.add(nm)
+                            vods.append(v)
+                    if len(vods) >= 36:
+                        break
+                if len(vods) >= 36:
+                    break
             self._fill_posters(vods)
             if not vods:
                 return {"list": self._diag_home()}
