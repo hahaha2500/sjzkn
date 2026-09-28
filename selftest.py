@@ -37,6 +37,8 @@ class MockOpener(object):
         url = req.full_url
         data = req.data
         self.calls.append((req.get_method(), url, data))
+        if url.endswith('/filter_movielist'):
+            self.last_headers = dict(req.header_items()) if hasattr(req, 'header_items') else dict(req.headers)
         body = None
         if '/filter_movielist' in url:
             from urllib.parse import parse_qs
@@ -144,6 +146,33 @@ def main():
     lp = sp.localProxy()
     assert isinstance(lp, list) and len(lp) == 4 and isinstance(lp[2], bytes)
     ok.append('契约: getDependence=[] / isVideoFormat ✓ / localProxy 四元组 ✓')
+
+    # 9) proof 头必须真的出现在 POST 请求头里（否则线上必 419）
+    from gaze import _proof_from_html
+    expect_proof = _proof_from_html(FILTER.decode('utf-8', 'replace'))
+    mo.calls.clear()
+    sp.categoryContent('2', 1, True, {})
+    posts = [(m, u, d) for m, u, d in mo.calls if u.endswith('/filter_movielist')]
+    assert posts, '没打到 /filter_movielist'
+    req_headers = getattr(mo, 'last_headers', {}) or {}
+    low = dict((k.lower(), v) for k, v in req_headers.items())   # urllib 会改头名大小写
+    hit = [k for k in expect_proof if k.lower() in low]
+    assert hit, 'proof 头没发出去！请求头=%s 期望含=%s' % (list(req_headers), list(expect_proof))
+    for k in hit:
+        assert low[k.lower()] == expect_proof[k], (k, low[k.lower()], expect_proof[k])
+    dom = [k for k in expect_proof if k.lower().startswith('x-gaze-')]
+    sent_dom = [k for k in hit if k.lower().startswith('x-gaze-')]
+    assert dom and sent_dom, '随机 DOM 头缺失！期望 %s' % dom
+    ok.append('proof 头随请求发出: %d/%d 个（含随机 DOM 头 %s）'
+              % (len(hit), len(expect_proof), sent_dom))
+
+    # 10) 首页抓取失败 -> 诊断卡（不给空白）
+    real_home = sp.sess.home_html
+    sp.sess.home_html = lambda: ""
+    dg = sp.homeContent()
+    assert len(dg['list']) == 1 and dg['list'][0]['vod_name'].startswith('[诊断]'), dg['list']
+    ok.append('首页失败兜底: %s ｜ %s' % (dg['list'][0]['vod_name'], dg['list'][0]['vod_content'][:60]))
+    sp.sess.home_html = real_home
 
     print('====== 五接口自测（真实页面样本 mock 网络层） ======')
     for i, line in enumerate(ok, 1):

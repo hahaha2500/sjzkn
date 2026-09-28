@@ -261,6 +261,7 @@ class Session(object):
         self._cap_ts = 0
         self._cache = {}
         self._last_req = 0.0
+        self.last_err = ""
 
     def _throttle(self, gap=0.45):
         dt = time.time() - self._last_req
@@ -332,7 +333,10 @@ class Session(object):
     def get(self, url, referer=None, tries=3):
         """GET，自动过 Cap / 退避 429"""
         last = None
+        deadline = time.time() + 28
         for i in range(tries):
+            if time.time() > deadline:
+                break
             try:
                 hs = {"Referer": referer} if referer else None
                 body = self._req(url, headers=hs)
@@ -342,28 +346,36 @@ class Session(object):
                     continue
                 return body
             except urllib.error.HTTPError as e:
-                last = "http%s" % e.code
+                last = "HTTP %s" % e.code
+                self.last_err = last
                 if e.code in (419, 428):
                     self.cap_bypass()
                     continue
                 if e.code in (403, 429, 503):
-                    time.sleep(15 if e.code == 403 else 8)
+                    time.sleep(8 if e.code == 403 else 6)
                     continue
                 return None
             except Exception as e:
                 last = repr(e)[:80]
+                self.last_err = last
                 time.sleep(3)
+        self.last_err = self.last_err or (last or "未知错误")
         return None
 
-    def post(self, url, data, referer=None, tries=3):
+    def post(self, url, data, referer=None, tries=3, extra_headers=None):
         payload = urllib.parse.urlencode(data).encode("utf-8")
         last = None
+        deadline = time.time() + 28
         for i in range(tries):
+            if time.time() > deadline:
+                break
             try:
                 hs = {"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
                       "Origin": self.host, "X-Requested-With": "XMLHttpRequest"}
                 if referer:
                     hs["Referer"] = referer
+                if extra_headers:
+                    hs.update(extra_headers)     # 页面 proof 头（缺了会 419）
                 return self._req(url, data=payload, headers=hs)
             except urllib.error.HTTPError as e:
                 last = "http%s" % e.code
@@ -418,13 +430,14 @@ class Session(object):
             if not html:
                 return None
             try:
-                proof = _proof_from_html(html)
-            except Exception:
+                proof = _proof_from_html(html)     # 页面 proof 头
+            except Exception as e:
+                self.last_err = "proof:%s" % repr(e)[:60]
                 self._filter_ts = 0
                 continue
             try:
                 raw = self.post(self.host + "/filter_movielist", params,
-                                referer=self.host + "/filter")
+                                referer=self.host + "/filter", extra_headers=proof)
             except ProofExpired:
                 self._filter_ts = 0
                 time.sleep(1)
@@ -452,15 +465,6 @@ def _clean(s):
 
 
 BAD_PIC = ("colorful.svg", "loading", "placeholder", "default", "blank", "transparent")
-
-
-def _good_pic(u):
-    if not u:
-        return False
-    low = u.lower()
-    if any(b in low for b in BAD_PIC):
-        return False
-    return low.startswith("http://") or low.startswith("https://") or low.startswith("/")
 
 
 def _fix_pic(u, host=SITE):
@@ -625,6 +629,13 @@ class Spider(BaseSpider):
         except Exception:
             html = ""
         lst = _home_cards(html) if html else []
+        if not lst:
+            lst = [{"vod_id": "diag",
+                    "vod_name": "[诊断] 首页抓取失败",
+                    "vod_pic": "",
+                    "vod_remarks": "反馈这行字给我",
+                    "vod_content": "原因: %s ｜ 时间: %s ｜ 域名: %s"
+                                   % (s.last_err or "未知", time.strftime("%H:%M:%S"), s.host)}]
         return {"class": CLASSES, "list": lst, "filters": self._filters()}
 
     def homeVideoContent(self):
