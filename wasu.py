@@ -31,22 +31,36 @@
    列表接口 pPic 常为 null（华数只在详情补图），所以 hPic 是列表海报主力。
 6. 播放地址 vodList[].fileList[].playUrl 是明文 m3u8，按 type 区分清晰度：
    110 = 标清(720x408)  120 = 1080P(1920x1080)
-7. ★CDN 防盗链：video.5g.wasu.tv 对境外/数据中心 IP 恒 403
-   （7 种 Referer + 完整浏览器头矩阵实测全部 403，主站同刻 200）
-   本源已把 Referer/UA 写进播放 header；能否播取决于使用者网络与 App。
-   另备「原页嗅探」线路做兜底。
+7. ★★播放的真正钥匙（本次最关键突破）★★
+   详情 vodList[].fileList[].playUrl 是【裸 m3u8，没有令牌】→ 直接播 403。
+   真实流程必须先换流：
+     POST /thirdApiFile/file/getPlayUrl
+        body  = {"playUrl":"<裸m3u8>","platform":"wap"}
+        header= content-type / siteId:10001 / launchChannel:wap_channel
+                x-sign = Base64(HmacSHA256(JSON.stringify(body), Base64Decode(SIGN_KEY_WAP)))
+     返回 {"code":200,"data":{"playUrl":"https://bdwapvideo.5g.wasu.tv/.../playlist.m3u8?auth_key=<expiry>-0-0-<md5>"}}
+   auth_key 首段是过期时间戳 → ★必须现取现播，不能长期缓存。
+   换流后裸请求即可 200（无需 Referer/UA），分片同样带各自 auth_key。
+8. x-sign 签名算法（逆向自 Qt 的 Gy/Qy → zc → Xy）：
+   JS: zc(data, siteId) = Xy(JSON.stringify(data), siteId)
+       Xy(msg, t) = Base64( HmacSHA256(msg, Base64Decode( t ? KEY_PC : KEY_WAP )) )
+   密钥（Base64 形式，明文是 UUID）：
+       KEY_WAP = "OTUxOGJiMWItY2NkYS00OTY4LWIwZDAtNDlkMTlkZDEzZWNl"  (wap_channel, siteId=10001)
+       KEY_PC  = "M2VjYzkwZmUtZGE1NC00YmQ2LThkMmUtNmU3ODIwZmJlNzZh"  (web_channel, siteId=1000101)
+   ★注意 JSON.stringify 的键顺序必须与 JS 一致：{"playUrl":...,"platform":"wap"}
+   ★注意没有 x-sign 时接口返回 {"code":500,"message":null,"data":null}（静默失败，不报错）
 """
 import json
 import re
 import base64
 import gzip
-import random
+import hmac
+import hashlib
 import threading
 import time
 import urllib.parse as _up
 import urllib.request as _ur
 import urllib.error as _ue
-from concurrent.futures import ThreadPoolExecutor
 
 try:
     from base.spider import Spider as _BaseSpider
@@ -60,7 +74,24 @@ _REFER = "https://www.wasu.cn/wap/"
 
 API = "https://mcspapp.5g.wasu.tv"
 UPS = "https://ups.5g.wasu.tv"
+EXCHANGE = API + "/thirdApiFile/file/getPlayUrl"
 PIC = "https://mcsppic.5g.wasu.tv"
+
+# x-sign 签名密钥（Base64，明文是 UUID）。缺 x-sign 时接口静默返回 code:500
+SIGN_KEY_WAP = "OTUxOGJiMWItY2NkYS00OTY4LWIwZDAtNDlkMTlkZDEzZWNl"
+SIGN_KEY_PC = "M2VjYzkwZmUtZGE1NC00YmQ2LThkMmUtNmU3ODIwZmJlNzZh"
+
+
+def _xsign(data, pc=False):
+    """Base64(HmacSHA256(JSON.stringify(data), Base64Decode(key)))
+    ★键顺序必须与前端一致：{"playUrl":...,"platform":"wap"}"""
+    try:
+        key = base64.b64decode(SIGN_KEY_PC if pc else SIGN_KEY_WAP)
+        msg = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+        return base64.b64encode(
+            hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()).decode()
+    except Exception:
+        return ""
 
 # 分类：一个 TVBox 分类 = 若干栏目 modeId 合并去重（站点无真分页）
 CLASSES = [
@@ -299,6 +330,57 @@ def _norm_pid(pid):
         # 4 段：d@@node@@news@@ep  → 当详情入口
         return "e", p[1], p[2], p[3]
     return "e", "108", p[0], "0"
+
+
+def _exchange(play_url, timeout=15):
+    """★核心：把详情里的【裸 m3u8】换成【带 auth_key 令牌的】真实流地址。
+    没有这一步，播放地址一律 403（这是本源的真正命门）。"""
+    if not play_url or not str(play_url).startswith("http"):
+        return ""
+    if "auth_key=" in str(play_url):
+        return str(play_url)          # 已有令牌，不重复换
+    data = {"playUrl": str(play_url), "platform": "wap"}
+    body = json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    hdr = {
+        "User-Agent": _UA,
+        "Referer": _REFER,
+        "Content-Type": "application/json;charset=utf-8",
+        "Accept": "application/json, text/plain, */*",
+        "siteId": "10001",
+        "launchChannel": "wap_channel",
+        "platform": "wap",
+        "x-sign": _xsign(data),
+    }
+    raw = b""
+    for getter in ("_ur", "req"):
+        try:
+            if getter == "_ur":
+                req = _ur.Request(EXCHANGE, data=body, headers=hdr)
+            else:
+                r = _sess().post(EXCHANGE, data=body, headers=hdr, timeout=timeout)
+                r.raise_for_status()
+                raw = r.content
+            if not raw:
+                req = _ur.Request(EXCHANGE, data=body, headers=hdr)
+            raw = _ur.urlopen(req, timeout=timeout).read()
+            break
+        except Exception:
+            continue
+    if not raw:
+        return ""
+    try:
+        d = json.loads(raw.decode("utf-8", "ignore"))
+    except Exception:
+        return ""
+    if not isinstance(d, dict) or d.get("code") not in (200, "200"):
+        return ""
+    node = d.get("data") or {}
+    if isinstance(node, dict):
+        for k in ("playUrl", "url", "playurl"):
+            v = node.get(k)
+            if v and isinstance(v, str) and v.startswith("http"):
+                return v
+    return ""
 
 
 class Spider(_BaseSpider):
@@ -552,39 +634,44 @@ class Spider(_BaseSpider):
         except Exception:
             return _empty_play()
         fl = str(flag or "")
-        # 嗅探线：回详情原页交 App 内建嗅探（flag 或 mode 命中都走这条）
+        # 嗅探线：回详情原页交 App 内建嗅探
         if "嗅探" in fl or mode == "s":
             return {"parse": 0, "url": _detail_url(node_id, news_id), "header": _ph()}
-        # 直连线：pid 里已带回 m3u8（免二次请求）
+
+        # 收集候选裸地址：pid 自带 → 详情定位
+        cands = []
         if mode == "m":
             u = str(id).split("@@", 1)[0]
             u = u[2:] if u[:2] == "m@" else u
             u = _up.unquote(u)
             if u.startswith("http"):
-                return {"parse": 0, "url": u, "header": _ph()}
-        # 兜底：重取详情按集号定位
-        d = _api(_detail_url(node_id, news_id), ttl=120)
-        data = (d or {}).get("data")
-        if isinstance(data, list):
-            data = data[0] if data else None
-        if not isinstance(data, dict):
-            return _empty_play()
-        vl = data.get("vodList") or []
-        if not (0 <= ep < len(vl)):
-            return _empty_play()
-        files = vl[ep].get("fileList") or []
-        cands = []
-        if "标清" in fl:
-            order = (110,)
-        else:
-            order = (120, 110)
-        for ty in order:
-            for f in files:
-                if isinstance(f, dict) and f.get("type") == ty and f.get("playUrl"):
-                    cands.append(f["playUrl"])
-        for f in files:
-            if isinstance(f, dict) and f.get("playUrl"):
-                cands.append(f["playUrl"])
+                cands.append(u)
+        if not cands or mode != "m":
+            d = _api(_detail_url(node_id, news_id), ttl=300)
+            data = (d or {}).get("data")
+            if isinstance(data, list):
+                data = data[0] if data else None
+            if isinstance(data, dict):
+                vl = data.get("vodList") or []
+                if 0 <= ep < len(vl) and isinstance(vl[ep], dict):
+                    files = vl[ep].get("fileList") or []
+                    order = (110,) if "标清" in fl else (120, 110)
+                    for ty in order:
+                        for f in files:
+                            if isinstance(f, dict) and f.get("type") == ty and f.get("playUrl"):
+                                cands.append(f["playUrl"])
+                    for f in files:
+                        if isinstance(f, dict) and f.get("playUrl"):
+                            cands.append(f["playUrl"])
+
+        # ★逐个换流：拿到带 auth_key 的地址才算成功
+        for u in cands:
+            if not (isinstance(u, str) and u.startswith("http")):
+                continue
+            real = _exchange(u)
+            if real:
+                return {"parse": 0, "url": real, "header": _ph()}
+        # 换流全失败：仍回裸地址让播放器自己试（万一后端放行）
         for u in cands:
             if isinstance(u, str) and u.startswith("http"):
                 return {"parse": 0, "url": u, "header": _ph()}
@@ -650,7 +737,3 @@ def _empty_play():
 def _diag(tag, msg):
     return {"vod_id": "diag@@0@@0@@0", "vod_name": "[诊断] " + tag,
             "vod_pic": "", "vod_remarks": "点我无用"}
-
-
-def _str_arg(x):
-    return x

@@ -67,6 +67,8 @@ for i, ln in enumerate(L):
     chk("播放[%s] parse" % ln, p.get("parse") in (0, 1))
     chk("  header 是 dict ★", isinstance(p.get("header"), dict), type(p.get("header")).__name__)
     chk("  返回 url", bool(p.get("url")), p.get("url", "")[:70])
+    if "嗅探" not in ln:
+        chk("  ★已换流带 auth_key(否则必403)", "auth_key=" in p.get("url",""), p.get("url","")[:60])
 # 切集
 if len(eps) > 3:
     e10 = eps[2].split("$", 1)[1]
