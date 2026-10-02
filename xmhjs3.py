@@ -195,19 +195,31 @@ def _parseid(s):
 
 
 def _grid_style():
-    """三栏宫格：FongMi/Common.Style.type=0(grid) + ratio=9
-    壳按 spans={1,1,1,1,1,2,2,2,3,3,4,4,1} 取列，index=ratio → spans[9]=3 → 三列
-    extend {"ratio":N} 可调：5/6/7→2列，9/10→3列，11→4列；ratio=-1 关闭用壳默认"""
+    """宫格样式（FongMi Common.Style）
+      type=0 → grid 宫格
+      span  → 直接指定"一行几栏"，壳支持 span 时它优先，最准确
+      ratio → 壳的老式换算（spans={1,1,1,1,1,2,2,2,3,3,4,4,1} 取 ratio 当下标）
+              ratio 5/6/7→2栏，9/10→3栏，11→4栏。**ratio 最大只能 4 栏，凑不出 6 栏**
+    两个都写：壳认 span 就按 span 走，不认就回退 ratio，绝不会因为多一个字段而崩
+    extend: {"span":6,"ratio":6} ；span=-1 或 ratio=-1 → 不用我的样式，走壳默认
+    """
     try:
-        r = int(getattr(_ST, "ratio", 9))
+        r = int(getattr(_ST, "ratio", 6))
     except Exception:
-        r = 9
-    if r < 0:
+        r = 6
+    try:
+        sp = int(getattr(_ST, "span", 6))
+    except Exception:
+        sp = 6
+    if sp < 0 and r < 0:
         return {}
-    return {"type": 0, "ratio": r}
+    st = {"type": 0, "ratio": r}
+    if sp > 0:
+        st["span"] = sp
+    return st
 
 
-_ST = type("S", (), {"ratio": 9})()
+_ST = type("S", (), {"ratio": 6, "span": 6})()
 
 # 历史长尾老图床特征：子域 picNN. 或 /pic/20xxMMDD/ 路径（实测每域仅挂 1 张，多为盗图小站）
 RE_TAIL = re.compile(r"^https?://pic\d+\.|/pic/20\d{4}/", re.I)
@@ -314,9 +326,19 @@ class Spider(_Base):
         self.host = (cfg.get("host") or "").rstrip("/")
         self.site = cfg.get("site") or SITE
         try:
-            _ST.ratio = int(cfg.get("ratio", 9))
+            _ST.ratio = int(cfg.get("ratio", 6))
         except Exception:
-            _ST.ratio = 9
+            _ST.ratio = 6
+        try:
+            # 只给了 ratio=-1 而没给 span 时，span 一并关闭（"用壳默认"要真的关干净）
+            if "span" in cfg:
+                _ST.span = int(cfg.get("span", 6))
+            elif _ST.ratio < 0:
+                _ST.span = -1
+            else:
+                _ST.span = 6
+        except Exception:
+            _ST.span = 6
         _ST.img_retry = int(cfg.get("img_retry", 0) or 0)
         _ST.proxy = cfg.get("proxy") or ""
         self.proxy_base = cfg.get("proxy_base") or ""
