@@ -137,7 +137,7 @@ def _grid_style():
 
 
 RE_CARD = re.compile(
-    r'(<a[^>]+href="[^"]*vod/play/id/(\d+)/sid/(\d+)/nid/(\d+)\.html"\s*[^>]*>)(.{0,900}?)</a>(.{0,260})?', re.S)
+    r'(<a[^>]+href="[^"]*vod/play/id/(\d+)/sid/(\d+)/nid/(\d+)\.html\s*"[^>]*>)(.{0,900}?)</a>((?:(?!<a\b[^>]*>).){0,260})?', re.S)
 # 占位图黑名单（宁窄勿宽）：只挡确凿的占位，绝不误杀真图
 BADIMG = ("loading.gif", "placeholder", "default_", "/default", "spacer", "blank.",
           "1x1.", "noimage", "null.png", "/img/grey")
@@ -160,8 +160,14 @@ def _pic_of(inner, href_attrs):
         v = m.group(1).strip()
         if v and not any(b in v.lower() for b in BADIMG):
             return v
+    # CSS 值形式：style="background-image: url(https://...)"
+    m = re.search(r'background-image\s*:\s*url\(\s*["\']?(https?://[^)"\']+)', href_attrs or "")
+    if m and not any(b in m.group(1).lower() for b in BADIMG):
+        return m.group(1).strip()
     # 全被占位挡了 → 退回第一个候选，宁可给占位也别给空
     m = re.search(r'(?:data-original|data-src|lay-src|data-background|src)="(https?://[^"]+)"', inner)
+    if not m:
+        m = re.search(r'background-image\s*:\s*url\(\s*["\']?(https?://[^)"\']+)', inner)
     return m.group(1).strip() if m else ""
 
 
@@ -199,14 +205,13 @@ def _title_of(inner, atitle, imgalt):
 
 
 def _cards(base, name, html):
-    out, seen = [], set()
+    """同一张卡片常有【两个 a】：标题 a（无图）+ 图片 a（有 data-original），
+    谁先匹配到不定 → 用 vid 做 key 合并，规则：有图 > 无图、有名 > 无名。"""
+    out, idx = [], {}
     for m in RE_CARD.finditer(html or ""):
         atag, vid, sid, nid, inner, outer = (list(m.groups()) + ["", ""])[:6]
         inner = inner or ""
         outer = outer or ""
-        if vid in seen:
-            continue
-        seen.add(vid)
         atitle = ""
         am = RE_A_TITLE.match(inner[:inner.find(">") + 1]) if inner.startswith("<a") else None
         if am:
@@ -226,8 +231,21 @@ def _cards(base, name, html):
         rm = re.search(r'class="[^"]*(?:label-private|duration|pstar|score)[^"]*"[^>]*>\s*([^<]{1,12})', inner)
         if rm:
             note = _clean(rm.group(1))
-        out.append({"_b": base, "_v": vid, "_s": sid, "_n": nid,
-                    "_t": title[:120], "_p": pic, "_r": (name or "")[:16], "_m": note[:10]})
+        card = {"_b": base, "_v": vid, "_s": sid, "_n": nid,
+                "_t": title[:120], "_p": pic, "_r": (name or "")[:16], "_m": note[:10]}
+        k = base + vid
+        old = idx.get(k)
+        if old is None:
+            idx[k] = len(out)
+            out.append(card)
+        else:
+            o = out[old]
+            if (not o["_p"]) and card["_p"]:
+                o["_p"] = card["_p"]
+            if (not o["_t"] or o["_t"] == vid) and card["_t"] and card["_t"] != vid:
+                o["_t"] = card["_t"]
+            if (not o["_m"]) and card["_m"]:
+                o["_m"] = card["_m"]
     return out
 
 
