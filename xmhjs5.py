@@ -198,12 +198,13 @@ def _grid_style():
     """宫格样式（FongMi Common.Style）
       type=0  → grid 宫格
       span   → 一行几栏（直接数字，最准确）
-      ratio  → 海报"宽:高"（0.33 = 1:3 细长竖版；1.0 = 正方形；1.5 = 横版）
+      ratio  → 海报"宽:高"（0.5 = 1:2 竖版；0.33 = 1:3 更瘦；1.0 = 正方形；1.5 = 横版）
                ratio<=0 表示用 App 默认比例
     extend 示例：
-      {}                              → 默认 6 栏 + 1:3 竖长
-      {"span":4,"ratio":0.33}         → 4 栏 + 1:3（栏少一点，海报更大，推荐先试这个）
-      {"span":6,"ratio":0.33}         → 6 栏 + 1:3
+      {}                              → 默认 6 栏 + 1:2 竖版
+      {"span":4}                      → 4 栏 + 1:2（栏少一点，海报更大）
+      {"span":3}                      → 3 栏 + 1:2（最大最清楚）
+      {"ratio":0.33}                  → 6 栏 + 1:3（更瘦长）
       {"span":3,"ratio":0}            → 3 栏 + App 默认比例
       {"span":-1}                     → 不用我的样式，走壳默认
     """
@@ -212,9 +213,9 @@ def _grid_style():
     except Exception:
         sp = 6
     try:
-        rt = float(getattr(_ST, "ratio", 0.33))
+        rt = float(getattr(_ST, "ratio", 0.5))
     except Exception:
-        rt = 0.33
+        rt = 0.5
     if sp < 0:
         return {}
     st = {"type": 0, "span": sp}
@@ -223,7 +224,7 @@ def _grid_style():
     return st
 
 
-_ST = type("S", (), {"ratio": 0.33, "span": 6})()
+_ST = type("S", (), {"ratio": 0.5, "span": 6})()
 
 # 历史长尾老图床特征：子域 picNN. 或 /pic/20xxMMDD/ 路径（实测每域仅挂 1 张，多为盗图小站）
 RE_TAIL = re.compile(r"^https?://pic\d+\.|/pic/20\d{4}/", re.I)
@@ -334,9 +335,9 @@ class Spider(_Base):
         except Exception:
             _ST.span = 6
         try:
-            _ST.ratio = float(cfg.get("ratio", 0.33))
+            _ST.ratio = float(cfg.get("ratio", 0.5))
         except Exception:
-            _ST.ratio = 0.33
+            _ST.ratio = 0.5
         _ST.img_retry = int(cfg.get("img_retry", 0) or 0)
         _ST.proxy = cfg.get("proxy") or ""
         self.proxy_base = cfg.get("proxy_base") or ""
