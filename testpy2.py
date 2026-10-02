@@ -125,12 +125,13 @@ class _UiDialog:
     def update(self, text):
         tv = self._holder.get("tv")
         if tv is None:
-            self._pending = text
+            self._pending = text      # 弹窗还没建好：缓存，等 on_ui 建好后自动补写
             return
+        self._pending = None          # 已能直写，清掉旧缓存，防止 flush 时回写过期文本
         self._post(lambda t=tv, x=text: t.setText(x))
 
     def flush(self):
-        """弹窗真正建好后调用：补写被缓存的首批文本"""
+        """弹窗真正建好后调用：补写被缓存的首批文本（清空后不会重复回写）"""
         tv = self._holder.get("tv")
         if tv is not None and self._pending is not None:
             self._post(lambda t=tv, x=self._pending: t.setText(x))
@@ -331,13 +332,21 @@ class Spider(_BaseSpider):
                 except Exception as e:
                     print("[py测活] 弹窗构建失败(已拦截):", _errstr(e))
                     traceback.print_exc()
+                    return
+                # tv 就绪：把「构建期间缓存的首批文本」立刻补上，否则第一批进度会丢
+                try:
+                    dlg.flush()
+                except Exception:
+                    pass
+
+            dlg = _UiDialog(act, holder)
 
             class Run(dynamic_proxy(Runnable)):
                 def run(self):
                     on_ui()
 
             act.getWindow().getDecorView().post(Run())
-            return _UiDialog(act, holder)
+            return dlg
         except Exception as e:
             print("[py测活] 弹窗失败:", _errstr(e))
             return _NoDialog()
