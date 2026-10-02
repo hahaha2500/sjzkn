@@ -115,8 +115,8 @@ def _sess():
         return _SESSION
 
 
-def _headers():
-    return {"User-Agent": random.choice(UA_POOL),
+def _headers(ua=None):
+    return {"User-Agent": ua or random.choice(UA_POOL),
             "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9"}
 
@@ -583,11 +583,15 @@ class Spider(_Base):
                 return [404, "text/plain", b"", {}]
             body, ct = None, "image/jpeg"
             px = _proxies() or None
+            netloc = urlparse(real).netloc
+            # ★防盗链判据：浏览器直接打开图片(空 Referer)能显示，App 里不行 →
+            #   图床多半【拒绝带 Referer 的请求】。所以按"空 → 图床域"两种都试。
+            refs = ["", "https://%s/" % netloc, "https://www.google.com/"]
             for i in range(3):
                 try:
                     ss = _sess()
-                    hd = _headers()
-                    hd["Referer"] = "https://%s/" % urlparse(real).netloc
+                    hd = _headers(UA_POOL[0] if i == 2 else None)
+                    hd["Referer"] = refs[i % len(refs)]
                     hd["Accept"] = "image/avif,image/webp,image/*,*/*;q=0.8"
                     if hasattr(ss, "get"):
                         r = ss.get(real, headers=hd, timeout=(4, 12), proxies=px)
