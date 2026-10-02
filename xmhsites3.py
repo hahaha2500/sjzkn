@@ -50,6 +50,51 @@ _CACHE = {}
 _ST = type("S", (), {"span": 6, "ratio": 0.5, "sites": 6})()
 
 
+def _proxies():
+    """★Python 不继承 Android 系统 VPN：手机开了梯子，App 直接加载图片仍不走代理，
+    取图必须【显式】指定本机代理端口。extend {"proxy":"http://127.0.0.1:7890"} 优先，否则自动探测。"""
+    p = getattr(_ST, "proxy", "") or ""
+    if p:
+        return {"http": p, "https": p}
+    try:
+        import socket
+        for port in (7890, 7891, 1080, 10808, 1087, 10809, 2333, 6153, 16666, 20170, 9090, 7070, 10848):
+            sk = socket.socket(); sk.settimeout(0.12)
+            r = sk.connect_ex(("127.0.0.1", port)); sk.close()
+            if r == 0:
+                pr = "http://127.0.0.1:%d" % port
+                _ST.proxy = pr
+                return {"http": pr, "https": pr}
+    except Exception:
+        pass
+    return {}
+
+
+_PNG1 = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000"
+    "000b4944415478da636000020000050001e9fadcd80000000049454e44ae426082")
+RE_TAIL = re.compile(r"^https?://pic\d+\.|/pic/20\d{4}/", re.I)
+
+
+def _localimg(pic):
+    b = base64.urlsafe_b64encode(pic.encode("utf-8")).decode("ascii").rstrip("=")
+    base = getattr(_ST, "proxy_base", "") or ""
+    return ("%s?do=py&type=img&url=%s" % (base, b)) if base else pic
+
+
+def _img_ok(pic):
+    """封面是否改走本地代理：0=原样直连(默认) / 1=只长尾老图床 / 2=全部"""
+    try:
+        mode = int(getattr(_ST, "img_retry", 0) or 0)
+        if not mode or not pic:
+            return pic
+        if mode >= 2 or RE_TAIL.search(pic):
+            return _localimg(pic)
+    except Exception:
+        pass
+    return pic
+
+
 def _sess():
     global _SESSION
     with _LOCK:
@@ -292,11 +337,39 @@ class Spider(_Base):
             _ST.mix = int(cfg.get("mix", 5))
         except Exception:
             _ST.mix = 5
+        try:
+            _ST.img_retry = int(cfg.get("img_retry", 0) or 0)
+        except Exception:
+            _ST.img_retry = 0
+        _ST.proxy = cfg.get("proxy") or ""
+        _ST.proxy_base = cfg.get("proxy_base") or self._auto_proxy_base()
         global STATIONS
         if cfg.get("stations"):
             STATIONS = cfg["stations"]
         if not STATIONS:
             STATIONS = _DEF
+
+    def _auto_proxy_base(self):
+        """取壳的本地代理服务地址（默影视/webhtv 用 Proxy.getUrl，失败则扫端口）"""
+        try:
+            from com.github.catvod import Proxy
+            u = Proxy.getUrl(True)
+            if u:
+                return u
+        except Exception:
+            pass
+        for port in range(9978, 9999):
+            try:
+                import socket
+                sk = socket.socket()
+                sk.settimeout(0.05)
+                r = sk.connect_ex(("127.0.0.1", port))
+                sk.close()
+                if r == 0:
+                    return "http://127.0.0.1:%d" % port
+            except Exception:
+                pass
+        return ""
 
     def getName(self):
         return SITE
@@ -372,7 +445,7 @@ class Spider(_Base):
                     x["_b"].split("//")[-1], x["_v"], x["_s"], x["_n"],
                     _b64e(x["_t"]), _b64e(x["_p"])),
                 "vod_name": x["_t"][:120],
-                "vod_pic": x["_p"],
+                "vod_pic": _img_ok(x["_p"]),
                 "vod_remarks": (x["_m"] or x["_r"])[:16],
                 "style": dict(_grid_style())}
 
@@ -492,7 +565,50 @@ class Spider(_Base):
         return ""
 
     def localProxy(self, param=None):
-        return [404, "text/plain", b"", {}]
+        """extend{"img_retry":1或2} 时把图片改走本地代理：
+        显式走本机代理 + 补 Referer + 3 次降级；取不到给 1x1 透明 PNG（不留裂图）。
+        默影视/webhtv 只在 ?do=py 时回调本方法；其它壳忽略参数 → 行为不变。"""
+        p = str(param or "")
+        try:
+            from urllib.parse import urlparse, parse_qs
+            if "do=py" not in p:
+                return [404, "text/plain", b"", {}]
+            qs = parse_qs(urlparse(p).query)
+            u = (qs.get("url") or [""])[0]
+            if not u:
+                return [404, "text/plain", b"", {}]
+            b = u.replace("-", "+").replace("_", "/")
+            real = base64.b64decode(b + "=" * (-len(b) % 4)).decode("utf-8", "replace")
+            if not real.startswith("http"):
+                return [404, "text/plain", b"", {}]
+            body, ct = None, "image/jpeg"
+            px = _proxies() or None
+            for i in range(3):
+                try:
+                    ss = _sess()
+                    hd = _headers()
+                    hd["Referer"] = "https://%s/" % urlparse(real).netloc
+                    hd["Accept"] = "image/avif,image/webp,image/*,*/*;q=0.8"
+                    if hasattr(ss, "get"):
+                        r = ss.get(real, headers=hd, timeout=(4, 12), proxies=px)
+                        if r.status_code == 200 and r.content:
+                            body, ct = r.content, (r.headers.get("Content-Type") or "image/jpeg")
+                            break
+                    else:
+                        import urllib.request
+                        op = urllib.request.build_opener(urllib.request.ProxyHandler(_proxies()))
+                        req = urllib.request.Request(real, headers=hd)
+                        with op.open(req, timeout=12) as fp:
+                            body, ct = fp.read(), (fp.headers.get("Content-Type") or "image/jpeg")
+                        break
+                except Exception:
+                    time.sleep(0.4)
+            if not body:
+                body = _PNG1
+                ct = "image/png"
+            return [200, ct, body, {"Content-Type": ct, "Cache-Control": "max-age=86400"}]
+        except Exception:
+            return [404, "text/plain", b"", {}]
 
     def destroy(self):
         pass
