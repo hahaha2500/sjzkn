@@ -56,6 +56,9 @@ CLS = [
 ]
 BADIMG = ("placeholder", "loading", "default", "1x1", "blank", "spacer")
 
+_PNG1 = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000"
+    "000b4944415478da636000020000050001e9fadcd80000000049454e44ae426082")
 _SESSION = None
 _LOCK = threading.Lock()
 _CACHE = {}          # 模块级：壳子可能每次 new Spider，实例字段会丢
@@ -83,6 +86,26 @@ def _sess():
             _SESSION = urllib.request
             return s
         return _SESSION
+
+
+def _proxies():
+    """Python 不继承 Android 系统 VPN；extend{"proxy":"http://127.0.0.1:7890"} 或常见端口自动探测"""
+    p = getattr(_ST, "proxy", "") or ""
+    if p:
+        return {"http": p, "https": p}
+    for port in (7890, 7891, 1080, 1087, 10809, 2333, 6153, 20170, 9090, 7070):
+        pr = "http://127.0.0.1:%d" % port
+        try:
+            import socket
+            sk = socket.socket()
+            sk.settimeout(0.15)
+            if sk.connect_ex(("127.0.0.1", port)) == 0:
+                sk.close()
+                return {"http": pr, "https": pr}
+            sk.close()
+        except Exception:
+            pass
+    return {}
 
 
 def _headers(self=None):
@@ -116,14 +139,15 @@ def _get(self, path, referer=None, nocache=False):
                 if referer:
                     hd["Referer"] = referer
                 if hasattr(s, "get"):
-                    r = s.get(u, headers=hd, timeout=(6, 14))
+                    r = s.get(u, headers=hd, timeout=(6, 14), proxies=_proxies() or None)
                     if r.status_code != 200:
                         continue
                     txt = r.text
                 else:
                     import urllib.request
                     req = urllib.request.Request(u, headers=hd)
-                    with urllib.request.urlopen(req, timeout=15) as fp:
+                    op = urllib.request.build_opener(urllib.request.ProxyHandler(_proxies()))
+                    with op.open(req, timeout=15) as fp:
                         txt = fp.read().decode("utf-8", "replace")
                 if txt and "页面迷路了" not in txt[:4000]:
                     with _LOCK:
@@ -170,6 +194,54 @@ def _parseid(s):
     return p[1] if len(p) > 1 else "1", "1", "1", "", ""
 
 
+def _grid_style():
+    """三栏宫格：FongMi/Common.Style.type=0(grid) + ratio=9
+    壳按 spans={1,1,1,1,1,2,2,2,3,3,4,4,1} 取列，index=ratio → spans[9]=3 → 三列
+    extend {"ratio":N} 可调：5/6/7→2列，9/10→3列，11→4列；ratio=-1 关闭用壳默认"""
+    try:
+        r = int(getattr(_ST, "ratio", 9))
+    except Exception:
+        r = 9
+    if r < 0:
+        return {}
+    return {"type": 0, "ratio": r}
+
+
+_ST = type("S", (), {"ratio": 9})()
+
+# 历史长尾老图床特征：子域 picNN. 或 /pic/20xxMMDD/ 路径（实测每域仅挂 1 张，多为盗图小站）
+RE_TAIL = re.compile(r"^https?://pic\d+\.|/pic/20\d{4}/", re.I)
+
+
+def _img_ok(self, pic):
+    """封面走不走本地代理，三档：
+      img_retry=0（默认）原样直连，不碰已验证能出的链路
+      img_retry=1 只把「长尾老图床」改走代理（补 Referer + 重试 + 失败给 1x1 PNG）
+      img_retry=2 全部封面走代理（若判断是防盗链/网络拦截，用这档）"""
+    try:
+        mode = int(getattr(_ST, "img_retry", 0) or 0)
+        if not mode or not pic:
+            return pic
+        if mode >= 2 or RE_TAIL.search(pic):
+            return _localimg(self, pic)
+    except Exception:
+        pass
+    return pic
+
+
+def _localimg(self, pic):
+    """把图片地址包成本地代理：?do=py&type=img&url=<urlsafe_b64>
+    默影视/webhtv 只有 do=py 才会回调本源的 localProxy；其它壳会忽略参数直接取原图（无害）"""
+    try:
+        b = base64.urlsafe_b64encode(pic.encode("utf-8")).decode("ascii").rstrip("=")
+        base = getattr(_ST, "proxy_base", "") or getattr(self, "proxy_base", "") or ""
+        if not base:
+            return pic
+        return "%s?do=py&type=img&url=%s" % (base, b)
+    except Exception:
+        return pic
+
+
 RE_CARD = re.compile(
     r'<a[^>]+href="([^"]*vod/play/id/(\d+)/sid/(\d+)/nid/(\d+)\.html)"[^>]*>(.{0,900}?)</a>',
     re.S)
@@ -205,9 +277,9 @@ def _cards(self, html):
         out.append({
             "vod_id": _mkid(vid, sid, nid, title, pic),
             "vod_name": title[:120],
-            "vod_pic": pic,
+            "vod_pic": _img_ok(self, pic),
             "vod_remarks": note[:20],
-            "style": {"type": "list"},
+            "style": dict(_grid_style()),
         })
     return out
 
@@ -241,6 +313,14 @@ class Spider(_Base):
             cfg = {"host": ex.rstrip("/")}
         self.host = (cfg.get("host") or "").rstrip("/")
         self.site = cfg.get("site") or SITE
+        try:
+            _ST.ratio = int(cfg.get("ratio", 9))
+        except Exception:
+            _ST.ratio = 9
+        _ST.img_retry = int(cfg.get("img_retry", 0) or 0)
+        _ST.proxy = cfg.get("proxy") or ""
+        self.proxy_base = cfg.get("proxy_base") or ""
+        _ST.proxy_base = self.proxy_base
 
     def getName(self):
         return self.site
@@ -300,7 +380,7 @@ class Spider(_Base):
             vod = {
                 "vod_id": raw if isinstance(raw, str) else raw[0],
                 "vod_name": (title or vid)[:120],
-                "vod_pic": pic,
+                "vod_pic": _img_ok(self, pic),
                 "vod_remarks": "正片",
                 "vod_content": "站方无详情页（点击直达播放页）；播放地址由播放页实时解析。",
                 "vod_play_from": "%s·直连$$$%s·嗅探" % (self.site, self.site),
@@ -380,7 +460,48 @@ class Spider(_Base):
         return ""
 
     def localProxy(self, param=None):
-        return [404, "text/plain", b"", {}]
+        """仅供 extend{"img_retry":1} 时把长尾图床改走本地代理：
+        代理取图 + 补 Referer + 多次降级；失败给 1x1 透明 PNG，不让 App 卡在裂图
+        （默影视/webhtv 只在 ?do=py 时回调本方法；其它壳忽略参数，不影响原有行为）"""
+        p = str(param or "")
+        try:
+            from urllib.parse import urlparse, parse_qs
+            if "type=img" not in p and "do=py" not in p:
+                return [404, "text/plain", b"", {}]
+            qs = parse_qs(urlparse(p).query)
+            u = (qs.get("url") or [""])[0]
+            if not u:
+                return [404, "text/plain", b"", {}]
+            b = u.replace("-", "+").replace("_", "/")
+            real = base64.b64decode(b + "=" * (-len(b) % 4)).decode("utf-8", "replace")
+            if not real.startswith("http"):
+                return [404, "text/plain", b"", {}]
+            body, ct = None, "image/jpeg"
+            for i in range(3):
+                try:
+                    s = _sess()
+                    hd = _headers()
+                    hd["Referer"] = "https://fnq.xmhjs8.best/"
+                    hd["Accept"] = "image/avif,image/webp,image/*,*/*;q=0.8"
+                    if hasattr(s, "get"):
+                        r = s.get(real, headers=hd, timeout=(4, 12), proxies=_proxies())
+                        if r.status_code == 200 and r.content:
+                            body, ct = r.content, (r.headers.get("Content-Type") or "image/jpeg")
+                            break
+                    else:
+                        import urllib.request
+                        req = urllib.request.Request(real, headers=hd)
+                        with urllib.request.urlopen(req, timeout=12) as fp:
+                            body, ct = fp.read(), (fp.headers.get("Content-Type") or "image/jpeg")
+                        break
+                except Exception:
+                    time.sleep(0.5)
+            if not body:
+                # 退到第一张主图床的占位（同站图片目录通常可用）
+                body = _PNG1
+            return [200, ct, body, {"Content-Type": ct, "Cache-Control": "max-age=86400"}]
+        except Exception:
+            return [404, "text/plain", b"", {}]
 
     def destroy(self):
         pass
