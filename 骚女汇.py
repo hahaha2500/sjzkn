@@ -343,9 +343,9 @@ class Spider(_BaseSpider):
             m2 = re.search(r"id=(\d+)", target)
             if not m2:
                 continue
-            html = self._fetch("%s/list.php?id=%s&page=1" % (
+            lh = self._fetch("%s/list.php?id=%s&page=1" % (
                 self.host, m2.group(1)), referer=self.host + "/")
-            for it in self._parse_list(html or ""):
+            for it in self._parse_list(lh or ""):
                 if it["vod_id"] == vid:
                     return it["vod_pic"]
         # 最后一档: 详情页第一张非模板图(可能是相关推荐，但有图总比空白好)
