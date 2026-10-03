@@ -13,6 +13,9 @@ class Spider(_BaseSpider):
     HOSTS = ["https://vfbai.snnvh82.sbs"]
     UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+    # 内容屏蔽：偷拍自拍 / 网曝事件 / 强奸乱伦 / 少女萝莉 四类不进目录
+    BLOCK_CIDS = {"9530846", "9610856", "9710866", "9760866"}
+    BLOCK_KW = ("小孩子", "门事件")
     _PICS = {}
     PNG_1X1 = base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
@@ -132,6 +135,13 @@ class Spider(_BaseSpider):
         s = s.replace("&nbsp;", " ").replace("&amp;", "&")
         return re.sub(r"\s+", " ", s).strip()
 
+    def _blocked(self, title):
+        t = title or ""
+        for kw in self.BLOCK_KW:
+            if kw in t:
+                return True
+        return False
+
     @staticmethod
     def _clean(t):
         t = (t or "").replace("$", "＄").replace("#", "＃")
@@ -150,6 +160,7 @@ class Spider(_BaseSpider):
                     n = self._dec(b64)
                     if n:
                         out.append({"type_id": cid, "type_name": n})
+            out = [c for c in out if c["type_id"] not in self.BLOCK_CIDS]
             if out:
                 return out
         return [{"type_id": "9500846", "type_name": "精品推荐"},
@@ -176,8 +187,11 @@ class Spider(_BaseSpider):
             name = self._dec(b64) if b64 else self._clean(txt)
             if not name:
                 continue
+            name = self._clean(name)
+            if self._blocked(name):
+                continue
             seen.add(vid)
-            items.append({"vod_id": vid, "vod_name": self._clean(name),
+            items.append({"vod_id": vid, "vod_name": name,
                           "vod_pic": self._pic(pic), "vod_remarks": "正片"})
         return items
 
@@ -258,6 +272,9 @@ class Spider(_BaseSpider):
     def categoryContent(self, tid, pg, filter, extend):
         cid = self._norm_tid(tid, extend)
         pg = max(1, int(pg or 1))
+        if cid in self.BLOCK_CIDS:
+            return {"list": [], "page": pg, "pagecount": 1,
+                    "limit": 0, "total": 0}
         url = "%s/list.php?id=%s&page=%d" % (self.host, cid, pg)
         html = self._fetch(url, referer=self.host + "/")
         items = self._parse_list(html)
@@ -289,13 +306,54 @@ class Spider(_BaseSpider):
         if m:
             name = self._dec(m.group(1))
         name = re.sub(r"^\[[^\]]*\]\s*", "", name).strip()
+        if self._blocked(name):
+            return {"list": [{"vod_id": vid, "vod_name": "已屏蔽",
+                              "vod_pic": "", "vod_play_from": "骚女汇",
+                              "vod_play_url": "正片$"}]}
+        # 封面四级兜底: 列表登记(本片真图) -> 番号回搜 -> 标题回搜 -> 详情页首图
         pic = self._PICS.get(vid, "")
+        if not pic:
+            pic = self._find_pic(name, vid, html)
         play = self._extract_m3u8(html) or ("s0@@" + url)
         ep = "正片$%s$$$正片$s0@@%s" % (play, url)
         return {"list": [{"vod_id": vid, "vod_name": name or ("影片 " + vid),
                           "vod_pic": pic, "vod_remarks": "正片",
                           "vod_play_from": "骚女汇·直连$$$骚女汇·原页",
                           "vod_play_url": ep}]}
+
+    RE_CODE = re.compile(r'(?<![A-Za-z0-9])([A-Z]{2,6})[-_]?(\d{2,5})(?!\d)')
+    BAD_CODE = ("ID", "MV", "HD", "TV", "3D", "UK", "US", "JP", "CN", "XX", "4K")
+
+    def _find_pic(self, name, vid, html):
+        """详情页自身无封面(og/meta/上传目录都没有)，用番号或标题回列表反查本片真图"""
+        cands = []
+        m = self.RE_CODE.search(name or "")
+        if m and m.group(1).upper() not in self.BAD_CODE:
+            cands.append(m.group(1).upper() + "-" + m.group(2))
+        if name:
+            cands.append(name.split(" ")[0][:24])
+        for kw in cands[:2]:
+            if not kw:
+                continue
+            url = "%s/search.php?content=%s" % (
+                self.host, urllib.parse.quote(kw))
+            target = self._redirect(url)
+            if not target:
+                continue
+            m2 = re.search(r"id=(\d+)", target)
+            if not m2:
+                continue
+            html = self._fetch("%s/list.php?id=%s&page=1" % (
+                self.host, m2.group(1)), referer=self.host + "/")
+            for it in self._parse_list(html or ""):
+                if it["vod_id"] == vid:
+                    return it["vod_pic"]
+        # 最后一档: 详情页第一张非模板图(可能是相关推荐，但有图总比空白好)
+        for u in re.findall(r'<img[^>]+src="([^"]+)"', html or ""):
+            if "/template/" in u or not u.startswith("http"):
+                continue
+            return self._pic(u)
+        return ""
 
     def playerContent(self, flag, id, vipFlags):
         id = str(id or "")
@@ -326,6 +384,8 @@ class Spider(_BaseSpider):
 
     def searchContent(self, key, quick, pg="1"):
         pg = max(1, int(pg or 1))
+        if self._blocked(str(key)):
+            return {"list": [], "page": pg, "pagecount": 1, "limit": 0, "total": 0}
         url = "%s/search.php?content=%s" % (self.host, urllib.parse.quote(str(key)))
         target = self._redirect(url)
         if not target:
