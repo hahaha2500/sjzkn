@@ -90,6 +90,10 @@ _PNG_1x1 = base64.b64decode(
 )
 
 
+_PROXY_BASE = ""          # 模块级缓存：端口扫描绝不能每条卡片都跑一遍
+_PROXY_TRIED = False
+
+
 class Spider(BaseSpider):
     def __init__(self):
         try:
@@ -305,6 +309,11 @@ class Spider(BaseSpider):
 
     # ---------------- 本地代理（默影视 ?do=py） ----------------
     def _proxy_base(self):
+        global _PROXY_BASE, _PROXY_TRIED
+        if _PROXY_BASE:
+            return _PROXY_BASE
+        if _PROXY_TRIED:
+            return ""
         base = ""
         if requests is not None:
             try:
@@ -320,12 +329,22 @@ class Spider(BaseSpider):
         if not base:
             for p in range(9978, 9999):
                 cand = "http://127.0.0.1:%d/proxy?do=py" % p
-                if self._probe(cand):
+                try:
+                    if requests is not None:
+                        self._sess().get(cand, timeout=2)
+                    else:
+                        _urlopen(_URequest(cand), timeout=2)
                     base = cand
                     break
-        if base and "siteKey=" not in base:
+                except Exception:
+                    continue
+        if not base:
+            _PROXY_TRIED = True          # 探不到就别每次重来
+            return ""
+        if "siteKey=" not in base:
             sk = self.site_key or self.getName()
             base = base + ("&" if "?" in base else "?") + "siteKey=" + urllib.parse.quote(sk)
+        _PROXY_BASE = base
         return base
 
     def _probe(self, url):
