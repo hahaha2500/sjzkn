@@ -66,7 +66,7 @@ BAD_IMG = ("loading", "logo", "placeholder", "blank", "220x307", "1x1", ".gif")
 BLOCK_TID = ()
 
 _CACHE = {}
-_CACHE_TTL = 300
+_CACHE_TTL = 600
 _SESSION = {}
 _LOCK = threading.Lock()
 # 壳可能每次调用都 new Spider，故 vid->片名/封面 必须放模块级
@@ -242,38 +242,16 @@ class Spider(BaseSpider):
         return "http://pics.dmm.co.jp/digital/video/%s/%spl.jpg" % (P, P)
 
     def _img_via(self, url):
-        """本地代理三档 Referer 降级取图；全败回 1x1 合法 PNG（宁小图也不留白块）"""
-        if not url.startswith("http"):
-            return ""
+        """直接生成本地代理 URL —— ★绝不在这同步抓图验证：
+        同步抓图 = 每张卡片 3 次 × 12s 超时 × 24 张 = 最坏十几分钟（实测卡死元凶）。
+        取图交给宿主 Glide 自己并发 + 它的超时，我们只负责把 Referer 策略塞进 localProxy。
+        """
+        if not url.startswith("http") or "?do=py" in url:
+            return url
         base = self._proxy_base()
         if not base:
-            # ★没有本地代理端口（壳未起服务）时必须回落原图直连，绝不能返空串
-            return url
-        host = re.match(r'https?://([^/]+)/', url)
-        host = host.group(1) if host else ""
-        trials = [
-            {},                                                          # 无 Referer（多数图床放行）
-            {"Referer": "https://" + host + "/"},                       # 图床自身域
-            {"Referer": self.host + "/", "User-Agent": UA_POOL[0]},     # 站点 + 普通浏览器 UA
-        ]
-        for extra in trials:
-            p = {"url": url, "type": "img"}
-            hdr = {"User-Agent": random.choice(UA_POOL), "Accept": "image/*,*/*"}
-            hdr.update(extra)
-            try:
-                if requests is not None:
-                    r = self._sess().get(url, headers=hdr, timeout=12)
-                    if r.status_code == 200 and r.content and r.content[:1] == b"\xff" \
-                            or (r.status_code == 200 and r.content[:1] == b"\x89"):
-                        return self._proxy_url_for(url, True)
-                else:
-                    resp = _urlopen(_URequest(url, headers=hdr), timeout=12)
-                    b = resp.read(64)
-                    if b[:1] in (b"\xff", b"\x89", b"\x47", b"\x52"):
-                        return self._proxy_url_for(url, True)
-            except Exception:
-                continue
-        return self._proxy_url_for(url, True)      # 交壳子走代理再试，兜底也不给空
+            return url          # 没有本地代理端口 → 回落原图直连，绝不返空
+        return self._proxy_url_for(url, True)
 
     def _pic(self, title, raw=""):
         if raw and not any(b in raw.lower() for b in BAD_IMG):
@@ -370,9 +348,32 @@ class Spider(BaseSpider):
         if not url.startswith("http"):
             return [404, "text/plain", b"", {}]
         is_img = p.get("type") == "img"
-        hdr = {"User-Agent": random.choice(UA_POOL), "Accept": "*/*"}
+        hdr = {"User-Agent": UA_POOL[0], "Accept": "image/*,*/*;q=0.8"}
         if is_img:
-            hdr["Referer"] = re.sub(r"(/[^/]+)?$", "/", url)
+            # ★三档 Referer 降级放这里做（每次请求独立试，不再阻塞列表）
+            host = re.match(r'https?://([^/]+)/', url)
+            host = host.group(1) if host else ""
+            try:
+                for extra in ({}, {"Referer": "https://" + host + "/"},
+                              {"Referer": self.host + "/"}):
+                    h2 = dict(hdr); h2.update(extra)
+                    if requests is not None:
+                        r = self._sess().get(url, headers=h2, timeout=15)
+                    else:
+                        r = _urlopen(_URequest(url, headers=h2), timeout=15)
+                    if requests is not None:
+                        if r.status_code != 200 or not r.content:
+                            continue
+                        body, mime = r.content, r.headers.get("Content-Type", "image/jpeg")
+                    else:
+                        body = r.read()
+                        mime = r.headers.get("Content-Type", "image/jpeg")
+                    if body[:1] in (b"<", b"{"):      # HTML 错误页不是图
+                        continue
+                    return [200, mime.split(";")[0], body, h2]
+            except Exception:
+                return [404, "text/plain", b"", hdr]
+            return [200, "image/png", _PNG_1x1, hdr]
         try:
             if requests is not None:
                 r = self._sess().get(url, headers=hdr, timeout=20)
@@ -404,19 +405,17 @@ class Spider(BaseSpider):
 
     # ---------------- 解析 ----------------
     def _nav(self):
-        html = self._get(ROUTE.replace("/index.php/vod", "") + "/../index.php/vod/type/id/20.html") or ""
-        t = self._get("/cn/home/web/index.php/vod/type/id/20.html") or html
+        # ★零额外请求：分类页 HTML 里本来就带全部分类导航，直接复用已缓存的那份
+        t = self._get("/cn/home/web/index.php/vod/type/id/20.html") or ""
         out = []
         for tid, name in re.findall(r'/vod/type/id/(\d+)\.html"[^>]*>\s*([^<]{1,20})', t):
             n = self._clean(name)
             if n and (tid, n) not in out:
                 out.append((tid, n))
-        home = self._get("/xmldc/") or ""
-        for tid, name in re.findall(r'/vod/type/id/(\d+)\.html"[^>]*>\s*([^<]{1,20})', home):
-            n = self._clean(name)
-            if n and (tid, n) not in out:
-                out.append((tid, n))
         return out or list(FALLBACK_CLASS)
+
+    def _list_html(self):
+        return self._get("/cn/home/web/index.php/vod/type/id/20.html") or ""
 
     def _parse_list(self, html, strict=True):
         items = []
@@ -456,8 +455,7 @@ class Spider(BaseSpider):
             items.append({
                 "vod_id": vid,
                 "vod_name": title,
-                "vod_pic": self.img_mode == "1" and pic.startswith("http") and self._proxy_base()
-                            and self._proxy_url_for(pic, True) or pic,
+                "vod_pic": pic,      # ★_pic() 里已按 img_mode 决定是否走代理，这里绝不再包一层（会双重编码）
                 "vod_remarks": "",
             })
         return items
@@ -472,7 +470,7 @@ class Spider(BaseSpider):
                if t not in BLOCK_TID]
         result = {"class": cls}
         try:
-            html = self._get("/cn/home/web/index.php/vod/type/id/20.html") or ""
+            html = self._list_html()
             lst = self._parse_list(html, strict=False)[:40]
             if lst:
                 result["list"] = lst
@@ -482,8 +480,7 @@ class Spider(BaseSpider):
 
     def homeVideoContent(self):
         try:
-            html = self._get("/cn/home/web/index.php/vod/type/id/20.html") or ""
-            return {"list": self._parse_list(html, strict=False)[:40]}
+            return {"list": self._parse_list(self._list_html(), strict=False)[:40]}
         except Exception:
             return {"list": []}
 
