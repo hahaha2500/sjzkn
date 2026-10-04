@@ -21,6 +21,15 @@ xmldc.py —— 小马拉大车（xmldc12.wiki）TVBox/FongMi 爬虫（type=3 Py
 加载层守默影视(webhtv)铁律：
   getDependence()→[]、显式 __init__ + 父类、localProxy(param=None) 四元组、header 全 dict、
   代理地址带 siteKey=<源key>、端口 9978~9999 动态不写死、六接口 return dict 不 dumps。
+
+★海报开关（extend 里填，改一个值即可切换档位）：
+    {"img_mode":"0"} = 默认。vod_pic 直接给站点原始图 URL，交给 App 自己取。
+                        ★先试这一档：若这样能出图 → 证明是图床按 Referer 拦 App，
+                          再试 "1"；若这样也不出图 → 是图床挂了/你网络问题，代码无解。
+    {"img_mode":"1"} = vod_pic 换成本地代理 URL（?do=py&type=img&url=base64），
+                        由本源 localProxy 自己控 Referer 三档降级（无 → 图床自身域 → 站点）。
+                        依赖壳子支持 ?do=py（默影视/webhtv、影视仓、蜜蜂、拾光 ✅；
+                        OK影视/FongMi/PickTV ❌ 不支持，会全空 → 别用这档）。
 """
 
 import base64
@@ -102,8 +111,14 @@ class Spider(BaseSpider):
             pass
         self.host = HOST
         self.ext = {}
-        self.img_mode = "1"
+        self.img_mode = "0"
         self.site_key = ""
+        try:
+            sk = getattr(self, "siteKey", None)     # 默影视 PyLoader 会注入真实源 key
+            if sk:
+                self.site_key = str(sk)
+        except Exception:
+            pass
 
     # ---------------- 加载层 ----------------
     def getName(self):
@@ -139,7 +154,7 @@ class Spider(BaseSpider):
                         self.ext = {}
         if self.ext.get("host"):
             self.host = str(self.ext["host"]).rstrip("/")
-        self.img_mode = str(self.ext.get("img_mode", "1"))
+        self.img_mode = str(self.ext.get("img_mode", "0"))
         self.site_key = str(self.ext.get("siteKey", "") or "")
 
     # ---------------- 网络 ----------------
@@ -319,9 +334,18 @@ class Spider(BaseSpider):
         if not base:
             _PROXY_TRIED = True          # 探不到就别每次重来
             return ""
-        if "siteKey=" not in base:
-            sk = self.site_key or self.getName()
-            base = base + ("&" if "?" in base else "?") + "siteKey=" + urllib.parse.quote(sk)
+        if base:
+            sk = self.site_key
+            if not sk:
+                try:
+                    sk = str(getattr(self, "siteKey", "") or "")
+                except Exception:
+                    sk = ""
+            if not sk:
+                sk = self.ext.get("site_key") or ""
+            if not sk:
+                sk = self.getName()
+            base = base + ("&" if "?" in base else "?") + "siteKey=" + urllib.parse.quote(sk, safe="")
         _PROXY_BASE = base
         return base
 
