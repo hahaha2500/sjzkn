@@ -94,6 +94,15 @@ RE_JSONURL = re.compile(r'"url"\s*:\s*"([^"]+)"')
 RE_CODE = re.compile(r'(?<![A-Za-z0-9])([A-Za-z]{2,6})\s*[-_ ]?\s*(\d{3,5})(?!\d)')
 CODE_BAD = ("id", "mv", "hd", "tv", "3d", "4k", "uk", "us", "jp", "cn", "xx", "ss", "av", "www")
 
+# ★图床域死亡名单（源侧实测不通的域，换域不如死链）。命中则直接换 DMM 番号封面。
+IMG_DEAD = (
+    "un.shayu260522.top", "fh260908.top", "ki.dadi260522.top", "lb260817.top",
+    "sbzytpimg11.com", "img.uyjthen.com", "fqjpg11.top", "2608.xbpi2608.top",
+    "thjpg15.vip", "fb.lj260522.top", "pic27.msn01.com", "pic24.anzise.com",
+    "pic31.xne03.com", "pic33.msn01.com", "pic15.ysj77.com", "pic.msn01.com",
+)
+IMG_ALIVE = ("abfrkjesk.com", "ckzyjpg.vip", "pic48.seaige.com")
+
 _PNG_1x1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
 )
@@ -269,7 +278,16 @@ class Spider(BaseSpider):
         return self._proxy_url_for(url, True)
 
     def _pic(self, title, raw=""):
-        if raw and not any(b in raw.lower() for b in BAD_IMG):
+        raw = (raw or "").strip()
+        if raw:
+            host = re.match(r'https?://([^/]+)', raw)
+            host = host.group(1) if host else ""
+            # 死域 → 不给死链，直接走 DMM 番号兜底（宁换图也不给空白）
+            if host in IMG_DEAD and host not in IMG_ALIVE:
+                raw = ""
+            elif any(b in raw.lower() for b in BAD_IMG):
+                raw = ""
+        if raw:
             if self.img_mode == "1":
                 v = self._img_via(raw)
                 if v:
@@ -421,11 +439,13 @@ class Spider(BaseSpider):
         base = self._proxy_base()
         if not base:
             return url
+        # ★base64 里的 '+' 在 query 中会被当空格，必须 percent-encode（safe=""）
         b64 = base64.b64encode(url.encode("utf-8")).decode("ascii")
+        q = urllib.parse.quote(b64, safe="")
         sep = "&" if "?" in base else "?"
         if is_img:
-            return base + sep + "type=img&url=" + urllib.parse.quote(b64, safe="")
-        return base + sep + "url=" + urllib.parse.quote(b64, safe="")
+            return base + sep + "type=img&url=" + q
+        return base + sep + "url=" + q
 
     # ---------------- 解析 ----------------
     def _nav(self):
@@ -609,6 +629,43 @@ class Spider(BaseSpider):
             return {"parse": 0, "url": url, "header": dict(hdr)}
         # 拿不到直链：交回播放页让宿主内建嗅探兜底
         return {"parse": 0, "url": self.host + path, "header": dict(hdr)}
+
+    def action(self, action):
+        """★诊断用：默影视里触发一次就能看到本源的代理/图床实况，用来定位海报问题。
+        返回 {ok, mode, proxy_base, site_key, sample_pic, probe, advice}"""
+        info = {"ok": False, "mode": self.img_mode, "site_key": self.site_key,
+                "proxy_base": "", "sample_pic": "", "probe": "", "advice": ""}
+        try:
+            try:
+                from com.github.catvod import Proxy
+                info["port"] = Proxy.getPort()
+            except Exception:
+                info["port"] = -1
+            try:
+                info["proxy_base"] = self._proxy_base()
+            except Exception as e:
+                info["proxy_base"] = "ERR:" + str(e)[:40]
+            html = self._get("/cn/home/web/index.php/vod/type/id/20.html") or ""
+            lst = self._parse_list(html)[:2]
+            info["sample_pic"] = lst[0]["vod_pic"] if lst else ""
+            if info["sample_pic"] and "?do=py" in info["sample_pic"]:
+                b64 = info["sample_pic"].split("url=")[-1]
+                try:
+                    real = base64.b64decode(urllib.parse.unquote(b64)).decode()
+                except Exception:
+                    real = ""
+                r = self.localProxy({"url": real, "type": "img"})
+                info["probe"] = "localProxy status=%s mime=%s bodyType=%s len=%s" % (
+                    r[0], r[1], type(r[2]).__name__, len(r[2]) if r[2] else 0)
+                info["real_url"] = real
+            else:
+                info["probe"] = "直连模式，未走代理"
+            info["ok"] = True
+            if info["proxy_base"] and info["port"] == -1:
+                info["advice"] = "端口为-1：壳子未注入 Proxy 端口，走代理档会全空，请把 extend 改回 {\"img_mode\":\"0\"}"
+        except Exception as e:
+            info["advice"] = "异常: " + str(e)[:80]
+        return info
 
     def searchContent(self, key, quick=False, pg="1"):
         kw = urllib.parse.quote(str(key or "").strip())
