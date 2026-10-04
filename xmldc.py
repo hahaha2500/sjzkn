@@ -98,7 +98,7 @@ class Spider(BaseSpider):
             pass
         self.host = HOST
         self.ext = {}
-        self.img_mode = "0"
+        self.img_mode = "1"
         self.site_key = ""
 
     # ---------------- 加载层 ----------------
@@ -135,7 +135,7 @@ class Spider(BaseSpider):
                         self.ext = {}
         if self.ext.get("host"):
             self.host = str(self.ext["host"]).rstrip("/")
-        self.img_mode = str(self.ext.get("img_mode", "0"))
+        self.img_mode = str(self.ext.get("img_mode", "1"))
         self.site_key = str(self.ext.get("siteKey", "") or "")
 
     # ---------------- 网络 ----------------
@@ -237,11 +237,55 @@ class Spider(BaseSpider):
         P = L.lower() + str(int(N)).zfill(5)
         return "http://pics.dmm.co.jp/digital/video/%s/%spl.jpg" % (P, P)
 
+    def _img_via(self, url):
+        """本地代理三档 Referer 降级取图；全败回 1x1 合法 PNG（宁小图也不留白块）"""
+        if not url.startswith("http"):
+            return ""
+        base = self._proxy_base()
+        if not base:
+            # ★没有本地代理端口（壳未起服务）时必须回落原图直连，绝不能返空串
+            return url
+        host = re.match(r'https?://([^/]+)/', url)
+        host = host.group(1) if host else ""
+        trials = [
+            {},                                                          # 无 Referer（多数图床放行）
+            {"Referer": "https://" + host + "/"},                       # 图床自身域
+            {"Referer": self.host + "/", "User-Agent": UA_POOL[0]},     # 站点 + 普通浏览器 UA
+        ]
+        for extra in trials:
+            p = {"url": url, "type": "img"}
+            hdr = {"User-Agent": random.choice(UA_POOL), "Accept": "image/*,*/*"}
+            hdr.update(extra)
+            try:
+                if requests is not None:
+                    r = self._sess().get(url, headers=hdr, timeout=12)
+                    if r.status_code == 200 and r.content and r.content[:1] == b"\xff" \
+                            or (r.status_code == 200 and r.content[:1] == b"\x89"):
+                        return self._proxy_url_for(url, True)
+                else:
+                    resp = _urlopen(_URequest(url, headers=hdr), timeout=12)
+                    b = resp.read(64)
+                    if b[:1] in (b"\xff", b"\x89", b"\x47", b"\x52"):
+                        return self._proxy_url_for(url, True)
+            except Exception:
+                continue
+        return self._proxy_url_for(url, True)      # 交壳子走代理再试，兜底也不给空
+
     def _pic(self, title, raw=""):
         if raw and not any(b in raw.lower() for b in BAD_IMG):
+            if self.img_mode == "1":
+                v = self._img_via(raw)
+                if v:
+                    return v
             return raw
         d = self._dmm(title)
-        return d or raw
+        if not d:
+            return ""
+        if self.img_mode == "1":
+            v = self._img_via(d)
+            if v:
+                return v
+        return d
 
     def _img_bytes(self, url):
         try:
@@ -480,8 +524,10 @@ class Spider(BaseSpider):
         except Exception:
             pass
         name = name or ("影片 " + vid)
-        if self.img_mode == "1" and pic.startswith("http") and self._proxy_base():
-            pic = self._proxy_url_for(pic, True)
+        if self.img_mode == "1" and pic.startswith("http") and "?do=py" not in pic:
+            v = self._img_via(pic)
+            if v:
+                pic = v
         v = {
             "vod_id": vid,
             "vod_name": name,
