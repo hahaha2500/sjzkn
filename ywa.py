@@ -415,6 +415,11 @@ class Spider(BaseSpider):
         return {"list": lst, "page": pg, "pagecount": max(pc, 1),
                 "limit": len(lst), "total": len(lst)}
 
+    def _play_path(self, vid):
+        if str(vid).startswith("http"):
+            return str(vid)
+        return "/index.php/vod/play/id/%s/sid/1/nid/1.html" % vid
+
     def playerContent(self, flag, id, vipFlags=None):
         try:
             pid = str(id)
@@ -425,6 +430,7 @@ class Spider(BaseSpider):
         if "@@" in pid:
             mode, vid = pid.split("@@", 1)
         vid = vid.split("@@")[0].strip()
+        vid = re.sub(r'^.*/play/id/(\d+)/.*$', r'\1', str(vid))
         try:
             fl = str(flag or "")
         except Exception:
@@ -433,7 +439,7 @@ class Spider(BaseSpider):
             mode = "p"
         elif "嗅探" in fl or "sniff" in fl.lower():
             mode = "s0"
-        path = "/index.php/vod/play/id/%s/sid/1/nid/1.html" % vid
+        path = self._play_path(vid)
         if mode == "s0":
             return {"parse": 0, "playUrl": "", "url": self.host + path,
                     "header": {"User-Agent": UA, "Referer": self.host + "/"}}
@@ -448,7 +454,7 @@ class Spider(BaseSpider):
                 mm = RE_M3U8.search(html)
                 if mm:
                     url = mm.group(1).replace("\\/", "/")
-        hd = {"User-Agent": UA}
+        hd = {"User-Agent": UA, "Referer": self.host + "/"}
         if url:
             # 代理线：清单与分片全是根相对路径，部分播放器会转圈 -> 交给本地代理重写
             if mode == "p" and self._base_url():
@@ -458,7 +464,7 @@ class Spider(BaseSpider):
                     _sep = "&" if "?" in _b else "?"
                     purl = "%s%surl=%s&type=hls" % (_b, _sep, _q(url, safe=""))
                     return {"parse": 0, "playUrl": "", "url": purl,
-                            "header": {"User-Agent": UA}}
+                            "header": {"User-Agent": UA, "Referer": self.host + "/"}}
                 except Exception:
                     pass
             return {"parse": 0, "playUrl": "", "url": url, "header": hd}
