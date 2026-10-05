@@ -345,8 +345,8 @@ class Spider(BaseSpider):
                 "vod_director": info.get("vod_director", ""),
                 "vod_content": "分类:%s 线路:%s" % (info.get("vod_class", ""),
                                                    info.get("from", "") or "默认"),
-                "vod_play_from": "欲望之眼·直连$$$欲望之眼·嗅探",
-                "vod_play_url": "正片$m$$$正片$s0",
+                "vod_play_from": "欲望之眼·直连$$$欲望之眼·代理$$$欲望之眼·嗅探",
+                "vod_play_url": "正片$m$$$正片$p$$$正片$s0",
             })
         return {"list": vods}
 
@@ -425,6 +425,14 @@ class Spider(BaseSpider):
         if "@@" in pid:
             mode, vid = pid.split("@@", 1)
         vid = vid.split("@@")[0].strip()
+        try:
+            fl = str(flag or "")
+        except Exception:
+            fl = ""
+        if "代理" in fl or "proxy" in fl.lower():
+            mode = "p"
+        elif "嗅探" in fl or "sniff" in fl.lower():
+            mode = "s0"
         path = "/index.php/vod/play/id/%s/sid/1/nid/1.html" % vid
         if mode == "s0":
             return {"parse": 0, "playUrl": "", "url": self.host + path,
@@ -442,15 +450,23 @@ class Spider(BaseSpider):
                     url = mm.group(1).replace("\\/", "/")
         hd = {"User-Agent": UA}
         if url:
-            if mode == "m" and self.isVideoFormat(url):
-                return {"parse": 0, "playUrl": "", "url": url, "header": hd}
-            if mode != "m":
-                return {"parse": 0, "playUrl": "", "url": url, "header": hd}
+            # 代理线：清单与分片全是根相对路径，部分播放器会转圈 -> 交给本地代理重写
+            if mode == "p" and self._base_url():
+                try:
+                    from urllib.parse import quote as _q
+                    _b = self._base_url()
+                    _sep = "&" if "?" in _b else "?"
+                    purl = "%s%surl=%s&type=hls" % (_b, _sep, _q(url, safe=""))
+                    return {"parse": 0, "playUrl": "", "url": purl,
+                            "header": {"User-Agent": UA}}
+                except Exception:
+                    pass
+            return {"parse": 0, "playUrl": "", "url": url, "header": hd}
         # 兜底：交 App 内建嗅探
         return {"parse": 0, "playUrl": "", "url": self.host + path,
                 "header": {"User-Agent": UA, "Referer": self.host + "/"}}
 
-    # ---------------- 本地代理（图片/播放页兜底） ----------------
+    # ---------------- 本地代理（图片/HLS 绝对化兜底） ----------------
     def _base_url(self):
         try:
             u = self.getProxyUrl(True)
@@ -459,6 +475,21 @@ class Spider(BaseSpider):
         except Exception:
             pass
         return ""
+
+    @staticmethod
+    def _abs(u, base):
+        if not u:
+            return u
+        u = u.strip()
+        if re.match(r'^[a-z]+://', u, re.I) or u.startswith("/"):
+            if u.startswith("/"):
+                p = urlparse(base)
+                return "%s://%s%s" % (p.scheme, p.netloc, u)
+            return u
+        try:
+            return urljoin(base, u)
+        except Exception:
+            return u
 
     def localProxy(self, param=None):
         try:
@@ -481,6 +512,7 @@ class Spider(BaseSpider):
                 except Exception:
                     pass
             is_img = param.get("type") == "img" or re.search(r'\.(jpg|jpeg|png|webp)(\?|$)', url, re.I)
+            is_hls = (param.get("type") == "hls") or re.search(r'\.m3u8(\?|$)', url, re.I)
             hd = {"User-Agent": UA, "Accept": "*/*",
                   "Referer": self.host + "/", "Accept-Encoding": "gzip, deflate"}
             s = _session()
@@ -488,7 +520,35 @@ class Spider(BaseSpider):
                 return [404, "text/plain", b"no session", {}]
             r = s.get(url, headers=hd, timeout=(8, 25))
             body = _decomp(r.content, r.headers)
-            if not body or body[:1] == b"<":
+            if not body:
+                return [404, "text/plain", b"fail", {}]
+            if is_hls:
+                # 把根相对路径全部绝对化，避免播放器转圈
+                try:
+                    txt = body.decode("utf-8", "ignore")
+                    out = []
+                    for ln in txt.splitlines():
+                        t = ln.strip()
+                        if not t:
+                            out.append(ln); continue
+                        if t.startswith("#"):
+                            if "URI=" in t:
+                                t = re.sub(r'URI="([^"]+)"',
+                                           lambda m: 'URI="%s"' % self._abs(m.group(1), url), t)
+                            out.append(t)
+                        elif t.startswith("/"):
+                            p = urlparse(url)
+                            out.append("%s://%s%s" % (p.scheme, p.netloc, t))
+                        elif not re.match(r'^[a-z]+://', t, re.I):
+                            out.append(urljoin(url, t))
+                        else:
+                            out.append(t)
+                    mime = "application/vnd.apple.mpegurl"
+                    nb = "\n".join(out).encode("utf-8")
+                    return [200, mime, nb, {"Content-Type": mime}]
+                except Exception:
+                    pass
+            if body[:1] == b"<":
                 return [404, "text/plain", b"fail", {}]
             if is_img:
                 mime = {b"\xff\xd8": "image/jpeg", b"\x89PNG": "image/png",
