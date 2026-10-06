@@ -122,7 +122,7 @@ class Spider:
             return u
         u = u.strip()
         if u.startswith("//"):
-            return "https:" + re.sub(r"/{2,}", "/", u[2:])
+            return "https://" + re.sub(r"/{2,}", "/", u[2:])
         u = re.sub(r"(?<!:)//+", "/", u)
         if u.startswith("http"):
             return u
