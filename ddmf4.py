@@ -150,6 +150,7 @@ class Spider(BaseSpider):
         self._cls = None
         self._cache = {}
         self._proxy_base = ''
+        self._img_mode = 0   # 0=原图直连(默认) 1=走本地代理
 
     def getName(self):
         return self.NAME
@@ -191,6 +192,10 @@ class Spider(BaseSpider):
                 self.limit = min(100, int(cfg['limit']))
         except Exception:
             pass
+        try:
+            self._img_mode = int(cfg.get('img', 0) or 0)
+        except Exception:
+            self._img_mode = 0
         self._proxy_base = self._auto_proxy_base()
 
     def _auto_proxy_base(self):
@@ -341,14 +346,26 @@ class Spider(BaseSpider):
         return ROUTE_NAMES.get(raw.lower(), raw)
 
     def _pic(self, url):
-        """封面优先走本地代理（源控 Referer + 通道兜底，规避图床防盗链/被墙）；
-        拿不到壳的代理地址时回退原图，绝不返回空"""
+        """封面：
+        默认【原图直连】—— 图床与主域同域，用户网络能直连 ddmf.net 时最稳、零折腾；
+        extend{"img":1} 才改走本地代理（源控 Referer，规避图床防盗链）。
+        ★ 走本地代理时必须带 siteKey：webhtv 的 BaseLoader.proxy 里
+          siteKey 优先于 do=py；只带 do=py 会走 PyLoader.proxy，
+          而它开头 if (recent == null) return null → Invalid proxy response。"""
         u = (url or '').strip()
         if not u:
             return ''
-        if not self._proxy_base:
+        if self._img_mode != 1 or not self._proxy_base:
             return u
         b = base64.urlsafe_b64encode(u.encode('utf-8')).decode('ascii').rstrip('=')
+        sk = ''
+        try:
+            sk = getattr(self, 'siteKey', '') or ''
+        except Exception:
+            sk = ''
+        if sk:
+            return '%s?do=py&siteKey=%s&type=img&url=%s' % (
+                self._proxy_base, urllib.parse.quote(sk, safe=''), b)
         return '%s?do=py&type=img&url=%s' % (self._proxy_base, b)
 
     def _items(self, lst):
@@ -402,7 +419,7 @@ class Spider(BaseSpider):
         return {'class': cls, 'filters': {}}
 
     def homeVideoContent(self):
-        j, e = self._api({'ac': 'list', 'pg': 1, 'limit': self.limit})
+        j, e = self._api({'ac': 'videolist', 'pg': 1, 'limit': self.limit})
         if not j:
             return self._diag_card(e)
         return {'list': self._items(j.get('list'))}
@@ -412,7 +429,7 @@ class Spider(BaseSpider):
             pg = int(pg or 1)
         except Exception:
             pg = 1
-        params = {'ac': 'list', 't': tid, 'pg': pg, 'limit': self.limit}
+        params = {'ac': 'videolist', 't': tid, 'pg': pg, 'limit': self.limit}
         flt = filter if isinstance(filter, dict) else {}
         if not flt and isinstance(extend, dict):
             flt = extend
@@ -441,7 +458,7 @@ class Spider(BaseSpider):
             pg = int(pg)
         except Exception:
             pg = 1
-        j, e = self._api({'ac': 'detail', 'wd': key, 'pg': pg, 'limit': self.limit})
+        j, e = self._api({'ac': 'videolist', 'wd': key, 'pg': pg, 'limit': self.limit})
         if not j:
             return self._diag_card(e)
         items = self._items(j.get('list'))
@@ -525,22 +542,50 @@ class Spider(BaseSpider):
     def localProxy(self, param=None):
         """取图通道：直连 → 公共代理 → 1x1 合法 PNG 兜底（不留裂图）"""
         try:
-            p = param
-            if isinstance(p, str):
-                p = json.loads(p) if p.strip().startswith('{') else {}
-            if not isinstance(p, dict):
-                p = {}
-            raw = p.get('url') or ''
+            # ★ 默影视/webhtv 回调时 param 是【整个 query 串】:
+            #   "do=py&type=img&url=<base64>"，不是 JSON！必须用 parse_qs 解。
+            #   （已验证源 xmhsites3.py 同写法；按 JSON 解析会拿不到 url → 404 → 海报全空）
+            # ★ webhtv/默影视 回调时 param = gson.toJson(params) → 【JSON 字符串】
+            #   {"do":"py","type":"img","url":"<base64>"}
+            #   必须先按 JSON 解；不能按 query 串解（urlparse 对裸 query 串取 .query 会空）
+            raw = ''
+            if isinstance(param, dict):
+                raw = param.get('url') or ''
+            else:
+                sp = str(param or '')
+                if sp.strip().startswith('{'):
+                    try:
+                        j = json.loads(sp)
+                        if isinstance(j, dict):
+                            raw = j.get('url') or ''
+                    except Exception:
+                        raw = ''
+                if not raw:
+                    # 兜底：裸 query 串形态
+                    try:
+                        from urllib.parse import urlparse, parse_qs
+                        sp2 = sp if '?' in sp else sp
+                        raw = (parse_qs(urlparse(sp2).query).get('url') or [''])[0]
+                        if not raw:
+                            raw = (parse_qs(sp2).get('url') or [''])[0]
+                    except Exception:
+                        raw = ''
+            if not raw:
+                return [404, 'text/plain', b'', {}]
             b = raw.replace('-', '+').replace('_', '/')
             real = base64.b64decode(b + '=' * (-len(b) % 4)).decode('utf-8', 'replace')
             if not real.startswith('http'):
                 return [404, 'text/plain', b'bad url', {'Content-Type': 'text/plain'}]
             for kind, prefix in self._channels():
                 if kind == 'direct':
-                    url = prefix + real[len(self.host):] if real.startswith(self.host) else real
+                    # 直连：完整原 URL（多域时把 www 换成主域再试）
+                    url = real
+                    if real.startswith('https://www.') and self.host:
+                        url = 'https://' + self.host.split('//')[-1] + real[len('https://www.'):]
                 elif kind == 'query':
                     url = _chan_url(('query', prefix), real)
                 else:
+                    # 路径包裹式：前缀 + 【完整原URL】
                     url = _chan_url(('path', prefix), real)
                 try:
                     req = urllib.request.Request(url)
