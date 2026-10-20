@@ -296,15 +296,17 @@ class Spider(BaseSpider):
                 _CH_STATE['err'] = {}
                 return j, ''
             errs.append('%s -> code=%s' % (prefix[:34], j.get('code')))
-        return {}, '; '.join(errs[:5])
+        return {}, errs[:6]
 
     def _diag_card(self, errs):
         """取站全失败时的诊断卡（写进首页，用户截图即可定位）"""
         lines = ['[诊断] 蛋蛋魔法影视 取站失败', '',
                  '直连域名: %s' % self.host, '',
                  '各通道失败原因:']
+        if isinstance(errs, str):
+            errs = [errs]
         for e in (errs or ['(无记录)']):
-            lines.append('  - ' + e)
+            lines.append('  - ' + str(e)[:130])
         lines += ['', '已试通道: 直连 x2 + 公共代理 x3',
                   '如手机浏览器也打不开 ddmf.net，说明你的网络被 Cloudflare 拦了。',
                   '可试: 开代理 / 换网络 / 用 extend 指定可用域名']

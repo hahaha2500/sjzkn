@@ -13,7 +13,7 @@ def ck(name, cond, extra=''):
 
 def main():
     base = sys.argv[1] if len(sys.argv) > 1 else CHANNEL
-    spec = importlib.util.spec_from_file_location('ddmf_mod', '/workspace/ddmf2.py')
+    spec = importlib.util.spec_from_file_location('ddmf_mod', '/workspace/ddmf3.py')
     m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
     S = m.Spider()
     # v2：默认直连 + 自动切公共代理通道（模拟直连被挡的真实场景）
