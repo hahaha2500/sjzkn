@@ -150,7 +150,7 @@ class Spider(BaseSpider):
         self._cls = None
         self._cache = {}
         self._proxy_base = ''
-        self._img_mode = 0   # 0=原图直连(默认) 1=走本地代理
+        self._img_mode = 0   # 0=走本地代理(默认) 1=原图直连
 
     def getName(self):
         return self.NAME
@@ -192,6 +192,7 @@ class Spider(BaseSpider):
                 self.limit = min(100, int(cfg['limit']))
         except Exception:
             pass
+        # img: 0=走本地代理(默认, 源内用通道取图) 1=原图直连
         try:
             self._img_mode = int(cfg.get('img', 0) or 0)
         except Exception:
@@ -355,7 +356,8 @@ class Spider(BaseSpider):
         u = (url or '').strip()
         if not u:
             return ''
-        if self._img_mode != 1 or not self._proxy_base:
+        # 0=走本地代理(默认) 1=原图直连
+        if self._img_mode == 1 or not self._proxy_base:
             return u
         b = base64.urlsafe_b64encode(u.encode('utf-8')).decode('ascii').rstrip('=')
         sk = ''
@@ -591,11 +593,16 @@ class Spider(BaseSpider):
                     req = urllib.request.Request(url)
                     req.add_header('User-Agent', self.UA)
                     req.add_header('Accept', 'image/avif,image/webp,image/*,*/*;q=0.8')
-                    req.add_header('Referer', self.host + '/')
+                    if kind == 'direct':
+                        # 直连时补 Referer（部分图床防盗链）；走公共通道时不带
+                        req.add_header('Referer', self.host + '/')
                     r = self._opener_for().open(req, timeout=20)
                     body = r.read()
-                    if body and body[:1] != b'<':
+                    # 站点 404 会返回 HTML 页面，必须排除
+                    if body and body[:1] != b'<' and len(body) > 200:
                         ct = r.headers.get('Content-Type') or 'image/jpeg'
+                        if 'text' in (ct or '').lower():
+                            ct = 'image/jpeg'
                         return [200, ct, body,
                                 {'Content-Type': ct, 'Cache-Control': 'max-age=86400'}]
                 except Exception:

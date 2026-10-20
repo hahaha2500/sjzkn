@@ -13,7 +13,7 @@ def ck(name, cond, extra=''):
 
 def main():
     base = sys.argv[1] if len(sys.argv) > 1 else CHANNEL
-    spec = importlib.util.spec_from_file_location('ddmf_mod', '/workspace/ddmf4.py')
+    spec = importlib.util.spec_from_file_location('ddmf_mod', '/workspace/ddmf5.py')
     m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
     S = m.Spider()
     # v2：默认直连 + 自动切公共代理通道（模拟直连被挡的真实场景）
@@ -35,6 +35,14 @@ def main():
        '%d/%d' % (sum(1 for v in L if v.get('vod_pic')), len(L)))
     ck('海报是http URL', all(str(v.get('vod_pic') or '').startswith('http') for v in L),
        (L[0].get('vod_pic') or '')[:60] if L else '')
+    ck('封面走本地代理(带do=py)', all('do=py' in str(v.get('vod_pic') or '') for v in L),
+       (L[0].get('vod_pic') or '')[:70] if L else '')
+    # siteKey 由壳注入(chaquo/Spider.java:34)，沙盒里没有 → 允许无 siteKey
+    S.siteKey = 'testkey'
+    cl2 = S.categoryContent('1', 1, False, {})
+    ck('封面带siteKey(壳注入后)',
+       all('siteKey=' in str(x.get('vod_pic') or '') for x in (cl2.get('list') or [])),
+       ((cl2.get('list') or [{}])[0].get('vod_pic') or '')[:80])
 
     print('\n[3] categoryContent 分类列表 + 分页')
     c1 = S.categoryContent('1', 1, False, {}); cl = c1.get('list') or []
@@ -86,6 +94,20 @@ def main():
     ck('localProxy 返回 list', isinstance(r, (list, tuple)))
     ck('localProxy >= 3 位', len(r) >= 3, len(r))
     ck('localProxy header 是 dict', len(r) < 4 or isinstance(r[3], dict))
+
+    print('\n[7b] localProxy 真图取流')
+    try:
+        import base64 as _b64
+        pic = 'https://ddmf.net/upload/vod/20261018-1/9cb25ba557a881f9b42e21ac538d2b98.jpg'
+        S._proxy_base = 'http://127.0.0.1:9978/proxy'
+        S.siteKey = 'test'
+        bb = _b64.urlsafe_b64encode(pic.encode()).decode().rstrip('=')
+        pr = json.dumps({'do': 'py', 'siteKey': 'test', 'type': 'img', 'url': bb})
+        rr = S.localProxy(pr)
+        ck('localProxy 取到真图', rr[0] == 200 and len(rr[2]) > 200 and rr[2][:1] != b'<',
+           'status=%s bytes=%d magic=%s' % (rr[0], len(rr[2]), rr[2][:4].hex()))
+    except Exception as e:
+        ck('localProxy 取到真图', False, str(e)[:80])
 
     print('\n[8] 加载层契约')
     ck('getDependence == []', S.getDependence() == [])
